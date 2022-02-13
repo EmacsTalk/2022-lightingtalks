@@ -1,0 +1,66 @@
+* Emacs -> Vterm
+#+begin_src elisp
+(require 'vterm)
+
+(defun run-cmd-in-vterm (cmd)
+  (let* ((name (concat "#Vterm " cmd))
+         (cmd (concat cmd "\n"))
+         (vterm-buffer (vterm--internal (lambda (_) nil) name)))
+    (with-current-buffer vterm-buffer
+      ;; don't show in vterm-toggle
+      (setq-local vterm-toggle--dedicated-p t)
+      (vterm-send-string cmd))))
+
+(run-cmd-in-vterm "ls -alh")
+#+end_src
+
+* Vterm -> Emacs
+#+begin_src shell
+if [[ "$INSIDE_EMACS" = 'vterm' ]]; then
+    function magit () {
+        vterm_cmd magit-status "$(realpath "${@:-.}")"
+    }
+fi
+#+end_src
+
+#+begin_src elisp
+;; whitelist
+(add-to-list 'vterm-eval-cmds '("magit-status" magit-status))
+#+end_src
+
+* Async Call
+#+begin_src elisp
+(run-cmd-in-vterm "~/script/fswatch.sh -i .org$ ~/some/path/")
+#+end_src
+
+** fswatch.sh
+#+begin_src shell
+#!/bin/bash
+vterm_printf(){
+    if [ -n "$TMUX" ] && ([ "${TERM%%-*}" = "tmux" ] || [ "${TERM%%-*}" = "screen" ] ); then
+        # Tell tmux to pass the escape sequences through
+        printf "\ePtmux;\e\e]%s\007\e\\" "$1"
+    elif [ "${TERM%%-*}" = "screen" ]; then
+        # GNU screen (screen, screen-256color, screen-256color-bce)
+        printf "\eP\e]%s\007\e\\" "$1"
+    else
+        printf "\e]%s\e\\" "$1"
+    fi
+}
+
+vterm_cmd() {
+    local vterm_elisp
+    vterm_elisp=""
+    while [ $# -gt 0 ]; do
+        vterm_elisp="$vterm_elisp""$(printf '"%s" ' "$(printf "%s" "$1" | sed -e 's|\\|\\\\|g' -e 's|"|\\"|g')")"
+        shift
+    done
+    vterm_printf "51;E$vterm_elisp"
+}
+
+export -f vterm_printf
+export -f vterm_cmd
+
+# fswatch -0 -x -v $@ | xargs -0 -n 1 -I {} bash -c 'vterm_cmd message "{}"'
+fswatch -0 -x --event=Created --event=Updated --event=Removed $@ | parallel -0 --progress "vterm_cmd message {}"
+#+end_src

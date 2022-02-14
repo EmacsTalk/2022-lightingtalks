@@ -1,0 +1,178 @@
+#+TITLE: org-mode与habitica的联动之旅
+#+AUTHOR: lujun9972
+#+TAGS: Emacs之怒
+#+DATE: [2022-02-13 日 16:14]
+#+LANGUAGE:  zh-CN
+#+STARTUP:  inlineimages
+#+OPTIONS:  H:6 num:nil toc:t \n:nil ::t |:t ^:nil -:nil f:t *:t <:nil
+
+* Habitica 介绍
+[[https://habitica.com/static/features][Habitica]]是一段将TODO list 游戏化的应用。
+** habitica的特点：
++ 游戏化
++ 比较成熟的社交体系（挑战、副本、聊天）
++ [[https://habitica.com/apidoc/][丰富的API]]，方便实现联动
++ 丰富的插件
+  
+** habitica的任务体系
++ [[https://habitica.fandom.com/zh/wiki/%E4%B9%A0%E6%83%AF][习惯]]
++ [[https://habitica.fandom.com/zh/wiki/%E6%AF%8F%E6%97%A5%E4%BB%BB%E5%8A%A1][每日任务]]
++ [[https://habitica.fandom.com/zh/wiki/%E5%BE%85%E5%8A%9E%E4%BA%8B%E9%A1%B9][代办事项]]
++ 支持tag
++ 奖励
+
+* emacs-habitica package
+
+Emacs 可以通过 [[https://github.com/abrochard/emacs-habitica][emacs-habitica]] 这个包来实现与 habitica 的交互。
+
+** 设置环境变量
+#+begin_src emacs-lisp
+  (defvar habitica-uid (getenv "HABITICA_UUID"))
+  (defvar habitica-token (getenv "HABITICA_TOKEN"))
+#+end_src
+
+** 主界面
+=M-x habitica-task=
+
+摘抄自Github仓库说明：
+#+begin_example
+  C-x t n => new task
+  C-x t t => cycle todo/done
+  C-x t + => + a habit
+  C-x t - => - a habit
+  C-x t d => set deadline
+  C-x t i => set difficulty
+  C-x t D => delete the task
+  C-x t b => buy reward
+  C-x t a => add a tag to the task
+  C-x t A => remove a tag from the task
+  C-x t g => refresh
+#+end_example
+
+** 融为一体
+
+通过下面三个命令，可以同步 habitica 与 org file中的任务：
+
++ habitica-insert-selected-task :: 将 habitica 任务插入到org file 中
+  
++ habitia-new-task-using-current-headline :: 根据 org file中的headline 生成 habitica 任务
+
++ habitica-delete-task :: 删除 headline 与对应的 habitica 任务
+
+
+通过下面配置，可以在 org file 完成任务时，自动完成 habitica 上的相应任务：
+#+begin_src emacs-lisp
+  (add-hook 'org-after-todo-state-change-hook 'habitica-task-done-up 'append)
+#+end_src
+
+* 我的配置
+
+** org-pomodoro
+番茄钟结束后，自动完成"番茄挑战"打卡任务
+#+begin_src emacs-lisp
+  (use-package org-pomodoro
+    :config
+    (setq org-pomodoro-keep-killed-pomodoro-time t)
+    (setq org-pomodoro-manual-break t)
+    (when (require 'habitica nil t)
+      (add-hook 'org-pomodoro-finished-hook (lambda ()
+                                              (habitica-api-score-task-by-name "🍅番茄挑战🍅" "up")))))
+#+end_src
+
+** Diary
+
+每日总结，自动获取当日天气、完成的番茄数和做过的任务：
+#+begin_src emacs-lisp
+  (setq org-capture-templates
+        `(("d" "diary" entry (file org-capture-template--get-daily-file)
+           "* 天气\n #+begin_example\n%(org-capture-template--get-weather)\n#+end_example\n* 生活\t:noexport:\n%?\n\n* 工作\t:noexport:\n\n* 番茄钟\n%(org-capture-template--get-pomodoro-count)\n* 今日事项\n%(org-capture-template--get-today-entries)\n* 总结")))
+
+#+end_src
+
+获取天气信息:
+#+begin_src emacs-lisp
+  (defun org-capture-template--get-weather (&optional city)
+    "获取天气信息"
+    (interactive)
+    (let* ((city (or city "东莞"))
+           (url (format "http://wttr.in/%s?0qT" city))
+           (url-request-method "GET")
+           (url-user-agent "curl/7.78.0")
+           (url-request-extra-headers '(("Accept-Language" . "zh")))
+           (buffer (url-retrieve-synchronously url))
+           (weather (with-current-buffer buffer
+                      (goto-char url-http-end-of-headers)
+                      (decode-coding-string  (buffer-substring (point) (point-max)) 'utf-8))))
+      (kill-buffer buffer)
+      weather))
+#+end_src
+
+获取今日做过的任务:
+#+begin_src emacs-lisp
+  (defun org-capture-template--get-today-entries ()
+    "获取今日做过的任务"
+    (let* ((org-agenda-show-log-scoped t)
+           (get-today-entries-fn (lambda (file)
+                                   (org-agenda-get-day-entries file (calendar-current-date) :closed)))
+           (today-entries (delete-dups (mapcan get-today-entries-fn
+                                               (org-agenda-files))))
+           (org-listify-fn (lambda (entry)
+                             (format "+ [ ] %s" entry)))
+           (today-entries-list (mapcar org-listify-fn today-entries)))
+      (string-join
+       today-entries-list
+       "\n")))
+#+end_src
+
+从 habitica 中读取番茄挑战的次数:
+#+begin_src emacs-lisp
+  (defun org-capture-template--get-pomodoro-count ()
+    "从 habitica 中读取番茄挑战的次数"
+    (when (require 'habitica nil t)
+      (let* ((task (habitica-api-get-task-by-name "🍅番茄挑战🍅"))
+             (history (cdr (assoc-string "history" task)))
+             (newest (elt (reverse history) 0))
+             (scoredUp (cdr (assoc-string "scoredUp" newest)))
+             (date (/ (cdr (assoc-string "date" newest)) 1000))
+             (score (if (= (time-to-days (current-time))
+                           (time-to-days date))
+                        scoredUp
+                      0)))
+        (format "🍅 X %s" score))))
+#+end_src
+
+** mobileorg
+通过修改原有的 =org-mobile-edit= 函数，实现手机上新增/完成任务时也同步在 habitica 上新增/完成任务。
+#+begin_src emacs-lisp
+  (defun org-mobile-edit (what old new)
+    "Edit item WHAT in the current entry by replacing OLD with NEW.
+  WHAT can be \"heading\", \"todo\", \"tags\", \"priority\", or \"body\".
+  The edit only takes place if the current value is equal (except for
+  white space) the OLD.  If this is so, OLD will be replace by NEW
+  and the command will return t.  If something goes wrong, a string will
+  be returned that indicates what went wrong."
+    (let (current old1 new1 level)
+      (if (stringp what) (setq what (intern what)))
+      (cond
+       ;; 省略
+       ((eq what 'addheading)
+        (if (org-at-heading-p)            ; if false we are in top-level of file
+            (progn
+              (org-show-subtree)
+              (end-of-line 1)
+              (org-insert-heading-respect-content t)
+              (org-demote))
+          (beginning-of-line)
+          (insert "* "))
+        (insert new)
+        (when (and (functionp #'habitica-new-task)
+                   (member "habitica" (org-get-tags)))
+          (let ((headlines (nth 4 (org-heading-components))))
+            (save-mark-and-excursion
+              (while (org-up-heading-safe)
+                (setq headlines (concat (nth 4 (org-heading-components)) "-" headlines))))
+            (message "habitica-task-name:%s" headlines)
+            (habitica--update-properties (habitica-api-create-task "todo" headlines)))))
+       ;; 省略
+       )))
+#+end_src
